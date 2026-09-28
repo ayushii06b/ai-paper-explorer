@@ -1,0 +1,7 @@
+pymupdf
+sentence-transformers
+transformers
+torch
+psycopg2-binary
+pgvector
+python-dotenv
