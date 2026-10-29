@@ -1,24 +1,53 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, Send, Sparkles, HelpCircle, FileText, Database, RotateCcw } from 'lucide-react';
+import { ArrowLeft, Send, Sparkles, HelpCircle, FileText, Database, RotateCcw, AlertTriangle } from 'lucide-react';
 import ChatMessage from '../components/ChatMessage';
 import LoadingState from '../components/LoadingState';
 import EmptyState from '../components/EmptyState';
 import { MOCK_PAPERS } from '../data/mockPapers';
+import { API_BASE_URL } from '../config/api';
 
-export default function PaperQAPage() {
+export default function PaperQAPage({ papers }) {
   const { id } = useParams();
   const [searchParams] = useSearchParams();
   const initialQ = searchParams.get('initialQ');
 
-  const paper = MOCK_PAPERS.find((p) => p.id === id);
+  const [fetchedPaper, setFetchedPaper] = useState(null);
+  const paperList = papers && papers.length > 0 ? papers : MOCK_PAPERS;
+  const paper = paperList.find((p) => String(p.id) === String(id)) || fetchedPaper || MOCK_PAPERS.find((p) => String(p.id) === String(id));
 
   const [inputQuestion, setInputQuestion] = useState('');
   const [messages, setMessages] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
-  const messagesEndRef = useRef(null);
+  const [loadingElapsed, setLoadingElapsed] = useState(0);
+  const [requestError, setRequestError] = useState(null);
 
-  // Initialize messages from paper mock QA history or initial URL question
+  const messagesEndRef = useRef(null);
+  const hasAutoSubmittedRef = useRef(false);
+  const timerRef = useRef(null);
+
+  // Fetch paper from backend if not yet in state (e.g. newly prepared external paper)
+  useEffect(() => {
+    if (!paper && id && !isNaN(Number(id))) {
+      fetch(`${API_BASE_URL}/api/papers/${id}`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (data) {
+            setFetchedPaper({
+              id: String(data.id),
+              title: data.title,
+              authors: data.authors,
+              year: data.year,
+              category: data.category,
+              abstract: data.snippet || "Vector-indexed arXiv paper."
+            });
+          }
+        })
+        .catch((err) => console.warn("Could not fetch paper details:", err));
+    }
+  }, [id, paper]);
+
+  // Initialize messages from paper mock QA history
   useEffect(() => {
     if (paper) {
       if (paper.qaHistory && paper.qaHistory.length > 0) {
@@ -34,12 +63,13 @@ export default function PaperQAPage() {
     }
   }, [paper]);
 
-  // Handle auto-submit if initialQ parameter is in URL
+  // Handle auto-submit safely once if initialQ parameter is in URL
   useEffect(() => {
-    if (initialQ && paper) {
+    if (initialQ && paper && !hasAutoSubmittedRef.current) {
+      hasAutoSubmittedRef.current = true;
       handleAskQuestion(initialQ);
     }
-  }, [initialQ]);
+  }, [initialQ, paper]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -63,35 +93,93 @@ export default function PaperQAPage() {
     );
   }
 
-  const handleAskQuestion = (questionText) => {
+  const handleAskQuestion = async (questionText) => {
     const q = questionText || inputQuestion;
     if (!q.trim() || isLoading) return;
 
+    setRequestError(null);
     const userMessageId = `user-${Date.now()}`;
     const newMsg = { id: userMessageId, sender: 'user', text: q.trim() };
 
     setMessages((prev) => [...prev, newMsg]);
     setInputQuestion('');
     setIsLoading(true);
+    setLoadingElapsed(0);
 
-    // Simulate mock vector search & grounded LLM generation
-    setTimeout(() => {
+    // Track elapsed time during local CPU generation
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = setInterval(() => {
+      setLoadingElapsed((prev) => prev + 1);
+    }, 1000);
+
+    // 90 second timeout for CPU generation
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, 90000);
+
+    try {
+      const isNumericId = !isNaN(Number(paper.id));
+      const payload = {
+        question: q.trim(),
+        top_k: 2,
+        paper_id: isNumericId ? Number(paper.id) : undefined,
+        max_new_tokens: 35
+      };
+
+      const endpoint = isNumericId
+        ? `${API_BASE_URL}/api/papers/${paper.id}/ask`
+        : `${API_BASE_URL}/api/ask`;
+
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+
+      if (!response.ok) {
+        throw new Error(`Server returned HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      const formattedSources = (data.sources || []).map((s, idx) => ({
+        page: s.page,
+        chunk: idx + 1,
+        text: `Paper: ${s.paper} | Page: ${s.page} (Cosine Similarity: ${s.similarity})`
+      }));
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `ai-${Date.now()}`,
+          sender: 'ai',
+          text: data.answer,
+          sources: formattedSources
+        }
+      ]);
+    } catch (err) {
+      console.warn("Backend API request failed or timed out:", err);
+
+      let errorMessage = "An error occurred while connecting to the backend.";
+      if (err.name === 'AbortError') {
+        errorMessage = "Request timed out after 90 seconds while synthesizing on local CPU. Try asking a more concise question.";
+      } else if (err.message) {
+        errorMessage = err.message;
+      }
+      setRequestError(errorMessage);
+
+      // Provide informative fallback answer so user context is not lost
       const isEmbeddingQ = q.toLowerCase().includes('dimension') || q.toLowerCase().includes('embedding') || q.toLowerCase().includes('vector');
-      
-      const mockAnswer = isEmbeddingQ
+      const fallbackAnswer = isEmbeddingQ
         ? `${paper.title} maps text chunks into a 768-dimensional normalized dense vector space using BAAI/bge-base-en-v1.5 encoder model. Embeddings are stored in PostgreSQL 17 using vector(768) type for fast cosine similarity search.`
-        : `Based on the retrieved context passages from ${paper.title}, the model addresses core research constraints by applying dense passage indexing and paragraph chunking up to 500 tokens with 75-token overlap boundaries.`;
+        : `Based on the retrieved context passages from ${paper.title}, the model addresses core research constraints by applying dense passage indexing and paragraph chunking with pgvector cosine similarity search.`;
 
-      const mockSources = [
+      const fallbackSources = [
         {
           page: 3,
-          chunk: 7,
-          text: `Sample passage extracted from ${paper.title} (Page 3, Chunk 7): "...paragraph text processed with BAAI/bge-base-en-v1.5 embedding encoder..."`
-        },
-        {
-          page: 5,
-          chunk: 12,
-          text: `Supporting reference passage (Page 5, Chunk 12): "...stored in PostgreSQL 17 pgvector database table paper_chunks..."`
+          chunk: 1,
+          text: `Sample passage extracted from ${paper.title} (Page 3): "...paragraph text processed with BAAI/bge-base-en-v1.5 embedding encoder..."`
         }
       ];
 
@@ -100,15 +188,22 @@ export default function PaperQAPage() {
         {
           id: `ai-${Date.now()}`,
           sender: 'ai',
-          text: mockAnswer,
-          sources: mockSources
+          text: `${fallbackAnswer} (${errorMessage})`,
+          sources: fallbackSources
         }
       ]);
+    } finally {
+      clearTimeout(timeoutId);
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
       setIsLoading(false);
-    }, 1200);
+    }
   };
 
   const handleResetChat = () => {
+    setRequestError(null);
     setMessages([]);
   };
 
@@ -131,6 +226,9 @@ export default function PaperQAPage() {
               <span className="px-1.5 py-0.2 rounded text-[10px] bg-indigo-500/10 text-indigo-300 border border-indigo-500/20">
                 BAAI/bge-base-en-v1.5
               </span>
+              <span className="px-1.5 py-0.2 rounded text-[10px] bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
+                LFM2.5-1.2B
+              </span>
             </div>
             <h1 className="text-base sm:text-lg font-bold text-slate-100 line-clamp-1">
               {paper.title}
@@ -149,6 +247,22 @@ export default function PaperQAPage() {
           </button>
         )}
       </div>
+
+      {/* Error Alert if any */}
+      {requestError && (
+        <div className="mb-4 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
+            <span>{requestError}</span>
+          </div>
+          <button
+            onClick={() => setRequestError(null)}
+            className="text-amber-400 hover:text-amber-200 font-medium ml-2 underline"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* Main Conversation Stream */}
       <div className="flex-1 overflow-y-auto pr-2 space-y-6 scrollbar-thin">
@@ -192,7 +306,7 @@ export default function PaperQAPage() {
             {messages.map((msg) => (
               <ChatMessage key={msg.id} message={msg} />
             ))}
-            {isLoading && <LoadingState type="qa" />}
+            {isLoading && <LoadingState type="qa" elapsed={loadingElapsed} />}
             <div ref={messagesEndRef} />
           </div>
         )}
@@ -227,7 +341,7 @@ export default function PaperQAPage() {
         </form>
         <p className="text-[11px] text-slate-400 text-center mt-2 flex items-center justify-center gap-1">
           <Database className="w-3 h-3 text-indigo-400" />
-          UI Mock Mode • Answers cite 768-dim BGE vector matched chunks
+          Live FastAPI Backend (pgvector + LFM2.5) • Grounded citations with page references
         </p>
       </div>
     </div>

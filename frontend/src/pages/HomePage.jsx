@@ -1,13 +1,14 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { Sparkles, Database, Layers, ArrowRight, BookOpen, Compass, ShieldCheck } from 'lucide-react';
+import { Sparkles, Database, Layers, ArrowRight, BookOpen, Compass, ShieldCheck, Globe } from 'lucide-react';
 import SearchBar from '../components/SearchBar';
 import PaperCard from '../components/PaperCard';
 import { MOCK_PAPERS } from '../data/mockPapers';
 
-export default function HomePage({ savedPaperIds, onToggleSave }) {
+export default function HomePage({ papers, savedPaperIds, onToggleSave }) {
   const navigate = useNavigate();
   const [searchQuery, setSearchQuery] = useState('');
+  const paperList = papers && papers.length > 0 ? papers : MOCK_PAPERS;
 
   const handleSearch = (query) => {
     if (query.trim()) {
@@ -77,6 +78,18 @@ export default function HomePage({ savedPaperIds, onToggleSave }) {
                 </button>
               ))}
             </div>
+
+            {/* Quick jump to arXiv Global Explorer */}
+            <div className="pt-3">
+              <Link
+                to="/search?tab=arxiv"
+                className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-purple-950/40 border border-purple-500/30 hover:border-purple-500/60 text-purple-300 hover:text-purple-200 text-xs font-medium transition-all shadow-sm group"
+              >
+                <Globe className="w-3.5 h-3.5 text-purple-400 group-hover:rotate-45 transition-transform" />
+                <span>Looking for external papers? Search millions of articles on <strong>arXiv Explorer</strong></span>
+                <ArrowRight className="w-3 h-3 text-purple-400" />
+              </Link>
+            </div>
           </div>
         </div>
       </section>
@@ -133,14 +146,14 @@ export default function HomePage({ savedPaperIds, onToggleSave }) {
             to="/search"
             className="inline-flex items-center gap-1.5 text-sm font-semibold text-indigo-400 hover:text-indigo-300 transition-colors"
           >
-            <span>View All Papers ({MOCK_PAPERS.length})</span>
+            <span>View All Papers ({paperList.length})</span>
             <ArrowRight className="w-4 h-4" />
           </Link>
         </div>
 
         {/* Paper Cards Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {MOCK_PAPERS.slice(0, 6).map((paper) => (
+          {paperList.slice(0, 6).map((paper) => (
             <PaperCard
               key={paper.id}
               paper={paper}

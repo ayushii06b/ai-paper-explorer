@@ -4,8 +4,9 @@ import PaperCard from '../components/PaperCard';
 import EmptyState from '../components/EmptyState';
 import { MOCK_PAPERS } from '../data/mockPapers';
 
-export default function SavedPapersPage({ savedPaperIds, onToggleSave, onClearAllSaved }) {
-  const savedPapers = MOCK_PAPERS.filter((p) => savedPaperIds.includes(p.id));
+export default function SavedPapersPage({ papers, savedPaperIds, onToggleSave, onClearAllSaved }) {
+  const paperList = papers && papers.length > 0 ? papers : MOCK_PAPERS;
+  const savedPapers = paperList.filter((p) => savedPaperIds.includes(String(p.id)) || savedPaperIds.includes(p.id));
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">

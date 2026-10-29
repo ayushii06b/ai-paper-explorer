@@ -5,13 +5,37 @@ import BookmarkButton from '../components/BookmarkButton';
 import PaperMetadata from '../components/PaperMetadata';
 import EmptyState from '../components/EmptyState';
 import { MOCK_PAPERS } from '../data/mockPapers';
+import { API_BASE_URL } from '../config/api';
 
-export default function PaperDetailsPage({ savedPaperIds, onToggleSave }) {
+export default function PaperDetailsPage({ papers, savedPaperIds, onToggleSave }) {
   const { id } = useParams();
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState('overview');
+  const [fetchedPaper, setFetchedPaper] = useState(null);
 
-  const paper = MOCK_PAPERS.find((p) => p.id === id);
+  const paperList = papers && papers.length > 0 ? papers : MOCK_PAPERS;
+  const paper = paperList.find((p) => String(p.id) === String(id)) || fetchedPaper || MOCK_PAPERS.find((p) => String(p.id) === String(id));
+
+  React.useEffect(() => {
+    if (!paper && id && !isNaN(Number(id))) {
+      fetch(`${API_BASE_URL}/api/papers/${id}`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (data) {
+            setFetchedPaper({
+              id: String(data.id),
+              title: data.title,
+              authors: data.authors,
+              year: data.year,
+              category: data.category,
+              abstract: data.snippet || "Paper stored in PostgreSQL + pgvector.",
+              overview: data.snippet || "Extracted and tokenized in vector database."
+            });
+          }
+        })
+        .catch((err) => console.warn("Could not fetch paper details:", err));
+    }
+  }, [id, paper]);
 
   if (!paper) {
     return (

@@ -6,17 +6,40 @@ import SearchResultsPage from './pages/SearchResultsPage';
 import PaperDetailsPage from './pages/PaperDetailsPage';
 import PaperQAPage from './pages/PaperQAPage';
 import SavedPapersPage from './pages/SavedPapersPage';
+import { MOCK_PAPERS } from './data/mockPapers';
+import { formatApiPaper } from './utils/paperAdapter';
+import { API_BASE_URL } from './config/api';
 
 export default function App() {
+  const [papers, setPapers] = useState(MOCK_PAPERS);
+  const [isBackendConnected, setIsBackendConnected] = useState(false);
+
   // Saved paper IDs state with localStorage persistence
   const [savedPaperIds, setSavedPaperIds] = useState(() => {
     try {
       const stored = localStorage.getItem('ai_explorer_saved_papers');
-      return stored ? JSON.parse(stored) : ['bge-v1-5', 'rag-paper-2020'];
+      return stored ? JSON.parse(stored) : ['53', '54', 'bge-v1-5', 'rag-paper-2020'];
     } catch {
-      return ['bge-v1-5', 'rag-paper-2020'];
+      return ['53', '54', 'bge-v1-5', 'rag-paper-2020'];
     }
   });
+
+  // Fetch real papers from FastAPI backend on load
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/api/papers`)
+      .then((res) => (res.ok ? res.json() : Promise.reject()))
+      .then((data) => {
+        if (Array.isArray(data) && data.length > 0) {
+          const formatted = data.map(formatApiPaper);
+          setPapers(formatted);
+          setIsBackendConnected(true);
+        }
+      })
+      .catch((err) => {
+        console.warn('Backend not online yet, using default paper catalog:', err);
+        setIsBackendConnected(false);
+      });
+  }, []);
 
   useEffect(() => {
     try {
@@ -40,7 +63,7 @@ export default function App() {
     <Router>
       <div className="min-h-screen flex flex-col bg-slate-950 text-slate-100 font-sans selection:bg-indigo-500 selection:text-white">
         {/* Navigation Header */}
-        <Navbar savedCount={savedPaperIds.length} />
+        <Navbar savedCount={savedPaperIds.length} isConnected={isBackendConnected} papersCount={papers.length} />
 
         {/* Main Route Content */}
         <main className="flex-1">
@@ -49,6 +72,7 @@ export default function App() {
               path="/"
               element={
                 <HomePage
+                  papers={papers}
                   savedPaperIds={savedPaperIds}
                   onToggleSave={handleToggleSave}
                 />
@@ -58,6 +82,7 @@ export default function App() {
               path="/search"
               element={
                 <SearchResultsPage
+                  papers={papers}
                   savedPaperIds={savedPaperIds}
                   onToggleSave={handleToggleSave}
                 />
@@ -67,16 +92,18 @@ export default function App() {
               path="/paper/:id"
               element={
                 <PaperDetailsPage
+                  papers={papers}
                   savedPaperIds={savedPaperIds}
                   onToggleSave={handleToggleSave}
                 />
               }
             />
-            <Route path="/paper/:id/ask" element={<PaperQAPage />} />
+            <Route path="/paper/:id/ask" element={<PaperQAPage papers={papers} />} />
             <Route
               path="/saved"
               element={
                 <SavedPapersPage
+                  papers={papers}
                   savedPaperIds={savedPaperIds}
                   onToggleSave={handleToggleSave}
                   onClearAllSaved={handleClearAllSaved}

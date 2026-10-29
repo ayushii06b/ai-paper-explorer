@@ -3,21 +3,28 @@ import { Loader2, Sparkles } from 'lucide-react';
 
 export default function LoadingState({
   message = "Searching vector database with BGE embeddings...",
-  type = "skeleton"
+  type = "skeleton",
+  elapsed = null
 }) {
   if (type === "qa") {
     return (
-      <div className="bg-slate-900/90 border border-indigo-500/30 rounded-2xl p-6 space-y-4 animate-pulse">
+      <div className="bg-slate-900/90 border border-indigo-500/30 rounded-2xl p-6 space-y-4">
         <div className="flex items-center gap-3">
           <div className="p-2 rounded-xl bg-indigo-600/20 text-indigo-400">
             <Sparkles className="w-5 h-5 animate-spin" />
           </div>
           <div>
-            <div className="h-4 bg-indigo-500/20 rounded w-48 mb-1.5"></div>
-            <div className="h-3 bg-slate-800 rounded w-32"></div>
+            <div className="text-sm font-semibold text-slate-200">
+              Synthesizing Grounded Answer
+            </div>
+            <div className="text-xs text-indigo-400 font-medium">
+              {elapsed !== null
+                ? `${elapsed}s elapsed • Local LFM2.5 model processing on CPU`
+                : 'Retrieving vector chunks with BAAI/bge-base-en-v1.5...'}
+            </div>
           </div>
         </div>
-        <div className="space-y-2 pt-2">
+        <div className="space-y-2 pt-2 animate-pulse">
           <div className="h-3 bg-slate-800 rounded w-full"></div>
           <div className="h-3 bg-slate-800 rounded w-5/6"></div>
           <div className="h-3 bg-slate-800 rounded w-4/6"></div>

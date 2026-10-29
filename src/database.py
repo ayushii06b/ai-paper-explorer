@@ -14,7 +14,15 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 
 
 def get_connection(db_name=None):
-    """Establishes a connection to the specified PostgreSQL database."""
+    """
+    Establishes a connection to the specified PostgreSQL database.
+    Prioritizes DATABASE_URL if set (cloud/hosted environment),
+    falling back to discrete DB_* settings (local development).
+    """
+    database_url = os.getenv("DATABASE_URL")
+    if database_url and not db_name:
+        return psycopg2.connect(database_url)
+
     target_db = db_name if db_name else DB_NAME
     conn = psycopg2.connect(
         host=DB_HOST,
@@ -61,6 +69,7 @@ def init_database():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS papers (
             id SERIAL PRIMARY KEY,
+            arxiv_id VARCHAR(100),
             title VARCHAR(500) NOT NULL,
             authors TEXT,
             year INT,
@@ -69,6 +78,8 @@ def init_database():
             created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
     """)
+    cursor.execute("ALTER TABLE papers ADD COLUMN IF NOT EXISTS arxiv_id VARCHAR(100);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_papers_arxiv_id ON papers(arxiv_id);")
 
     # Table: paper_chunks
     cursor.execute("""

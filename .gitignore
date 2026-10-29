@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# Environment Variables
+.env
+.env.*
+!.env.example
+*.env
+.env.local
+
+# Research Paper PDFs & large downloads
+Data/downloaded_papers/
+Data/papers/
+*.pdf
+
+# Scratch, Tasks & Logs
+scratch/
+*.log
+.system_generated/
+
+# Node & Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/

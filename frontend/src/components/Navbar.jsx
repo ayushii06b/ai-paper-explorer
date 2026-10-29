@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { BookOpen, Bookmark, Search, Info, Sparkles, Menu, X } from 'lucide-react';
+import { BookOpen, Bookmark, Search, Info, Sparkles, Menu, X, Globe } from 'lucide-react';
 
-export default function Navbar({ savedCount = 0 }) {
+export default function Navbar({ savedCount = 0, isConnected = false, papersCount = 41 }) {
   const location = useLocation();
   const [showAbout, setShowAbout] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -12,6 +12,9 @@ export default function Navbar({ savedCount = 0 }) {
     if (path !== '/' && location.pathname.startsWith(path)) return true;
     return false;
   };
+
+  const isArxivTab = location.pathname === '/search' && location.search.includes('tab=arxiv');
+  const isLocalTab = location.pathname === '/search' && !location.search.includes('tab=arxiv');
 
   return (
     <>
@@ -26,8 +29,13 @@ export default function Navbar({ savedCount = 0 }) {
             <div>
               <span className="font-bold text-lg text-slate-100 tracking-tight flex items-center gap-1.5">
                 AI Paper Explorer
-                <span className="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
-                  v1.0
+                <span className={`text-[10px] font-semibold tracking-wider px-2 py-0.5 rounded flex items-center gap-1.5 border ${
+                  isConnected
+                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                    : 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20'
+                }`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-emerald-400 animate-pulse' : 'bg-indigo-400'}`}></span>
+                  {isConnected ? 'Backend Connected' : 'v1.0'}
                 </span>
               </span>
               <p className="text-[11px] text-slate-400 hidden sm:block">Semantic Vector Research Engine</p>
@@ -49,15 +57,30 @@ export default function Navbar({ savedCount = 0 }) {
             </Link>
 
             <Link
-              to="/search"
+              to="/search?tab=local"
               className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-sm font-medium transition-colors ${
-                isActive('/search')
+                isLocalTab
                   ? 'bg-slate-800 text-indigo-400 font-semibold'
                   : 'text-slate-300 hover:text-slate-100 hover:bg-slate-900'
               }`}
             >
               <BookOpen className="w-4 h-4" />
-              Search Library
+              Library ({papersCount})
+            </Link>
+
+            <Link
+              to="/search?tab=arxiv"
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-sm font-medium transition-colors ${
+                isArxivTab
+                  ? 'bg-slate-800 text-indigo-400 font-semibold'
+                  : 'text-slate-300 hover:text-slate-100 hover:bg-slate-900'
+              }`}
+            >
+              <Globe className="w-4 h-4 text-purple-400" />
+              <span>arXiv Explorer</span>
+              <span className="px-1.5 py-0.2 text-[10px] uppercase font-bold tracking-wider rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                New
+              </span>
             </Link>
 
             <Link
@@ -109,12 +132,24 @@ export default function Navbar({ savedCount = 0 }) {
               Explore
             </Link>
             <Link
-              to="/search"
+              to="/search?tab=local"
               onClick={() => setMobileMenuOpen(false)}
               className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-slate-200 hover:bg-slate-900"
             >
               <BookOpen className="w-4 h-4" />
-              Search Library
+              Local Library ({papersCount})
+            </Link>
+            <Link
+              to="/search?tab=arxiv"
+              onClick={() => setMobileMenuOpen(false)}
+              className="flex items-center justify-between px-3 py-2 rounded-lg text-sm font-medium text-slate-200 hover:bg-slate-900"
+            >
+              <span className="flex items-center gap-2">
+                <Globe className="w-4 h-4 text-purple-400" /> arXiv Explorer
+              </span>
+              <span className="px-1.5 py-0.2 text-[10px] uppercase font-bold rounded bg-purple-500/20 text-purple-300">
+                New
+              </span>
             </Link>
             <Link
               to="/saved"
@@ -180,7 +215,7 @@ export default function Navbar({ savedCount = 0 }) {
               </div>
 
               <div className="bg-indigo-950/30 border border-indigo-500/20 rounded-lg p-3 text-xs text-indigo-300">
-                <strong>Current Stage:</strong> Frontend UI/UX Layer. Frontend components use structured client mock data ready for seamless FastAPI REST integration.
+                <strong>Full-Stack Architecture:</strong> Fully connected and live. Running FastAPI backend, PostgreSQL 17 + pgvector (768-dim BGE embeddings), LFM2.5 local instruction model, and official arXiv live search & automated ingestion.
               </div>
             </div>
 
