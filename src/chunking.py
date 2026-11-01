@@ -6,6 +6,10 @@ MODEL_NAME = "BAAI/bge-base-en-v1.5"
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
 
+MAX_TOKENS = 400
+OVERLAP_TOKENS = 50
+
+
 def count_tokens(text):
     return len(
         tokenizer.encode(
@@ -15,73 +19,62 @@ def count_tokens(text):
     )
 
 
-def chunk_page(page, max_tokens = 500, overlap_tokens = 75):
-    text = page["text"]
+def split_text_by_tokens(text, max_tokens=MAX_TOKENS, overlap_tokens=OVERLAP_TOKENS):
+    encoded = tokenizer(text, return_offsets_mapping=True, add_special_tokens=False)
+    input_ids = encoded["input_ids"]
+    offsets = encoded["offset_mapping"]
 
-    paragraphs = [
-        p.strip()
-        for p in text.split("\n\n")
-        if p.strip()
-    ]
+    if not input_ids:
+        return []
+
     chunks = []
-    current = []
-    current_tokens = 0
+    start = 0
+    total = len(input_ids)
 
-    for paragraph in paragraphs:
-        paragraph_tokens = count_tokens(paragraph)
+    while start < total:
+        end = min(start + max_tokens, total)
+        char_start = offsets[start][0]
+        char_end = offsets[end - 1][1]
 
-        if paragraph_tokens <= max_tokens:
-            if current_tokens + paragraph_tokens <= max_tokens:
-                current.append(paragraph)
-                current_tokens += paragraph_tokens
+        piece = text[char_start:char_end].strip()
+        if piece:
+            chunks.append(piece)
 
-            else:
-                if current:
-                    chunks.append("\n\n".join(current))
-                overlap = []
-                overlap_count = 0
+        if end >= total:
+            break
 
-                for p in reversed(current):
-                    p_tokens = count_tokens(p)
+        start = end - overlap_tokens
 
-                    if overlap_count + p_tokens > overlap_tokens:
-                        break
-                    overlap.insert(0, p)
-                    overlap_count += p_tokens
-                current = overlap + [paragraph]
-                current_tokens = overlap_count + paragraph_tokens
-        else :
-            if current:
-                chunks.append("\n\n".join(current))
-                current = []
-                current_tokens = 0
-            tokens = tokenizer.encode(
-                paragraph,
-                add_special_tokens=False
-            )
-
-            for i in range(0, len(tokens), max_tokens):
-                piece_tokens = tokens[i:i + max_tokens]
-
-                piece = tokenizer.decode(
-                    piece_tokens,
-                    skip_special_tokens=True
-                )
-
-                chunks.append(piece)
-    if current:
-        chunks.append("\n\n".join(current))
     return chunks
+
+
+def chunk_page(page):
+    text = page["text"].strip()
+
+    if not text:
+        return []
+
+    return split_text_by_tokens(text)
+
 
 def chunk_document(pages):
     chunks = []
-
     chunk_id = 0
 
     for page in pages:
         page_chunks = chunk_page(page)
 
         for text in page_chunks:
+            # Final safety check
+            token_count = count_tokens(text)
+
+            if token_count > MAX_TOKENS:
+                print(
+                    f"WARNING: chunk {chunk_id} has "
+                    f"{token_count} tokens"
+                )
+                continue
+
             chunks.append({
                 "chunk_id": chunk_id,
                 "page": page["page"],

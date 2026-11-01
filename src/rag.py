@@ -83,7 +83,7 @@ def load_model():
             return None, None
 
 
-def construct_context(chunks, max_chunk_chars: int = 450) -> str:
+def construct_context(chunks, max_chunk_chars: int = 1400) -> str:
     """
     Formats retrieved chunks into a clean context string for prompt.
     Includes Paper title, Page number, and Chunk text.
@@ -129,21 +129,27 @@ def generate_rag_answer(
 
     # 2. Extract sources
     sources = []
-    seen_sources = set()
+    seen_chunks = set()
     for chunk in chunks:
-        source_key = (chunk["title"], chunk["page"])
-        if source_key not in seen_sources:
-            seen_sources.add(source_key)
-            sources.append({
-                "paper": chunk["title"],
-                "page": chunk["page"],
-                "similarity": round(float(chunk["similarity"]), 4)
-            })
+        cid = chunk.get("chunk_id")
+        if cid is not None and cid in seen_chunks:
+            continue
+        if cid is not None:
+            seen_chunks.add(cid)
+        sources.append({
+            "paper": chunk["title"],
+            "page": chunk["page"],
+            "similarity": round(float(chunk["similarity"]), 4),
+            "text": chunk.get("text", "").strip(),
+            "chunk_id": chunk.get("chunk_id")
+        })
 
     # 3. Check context availability / similarity threshold
-    if not chunks or (chunks and chunks[0]["similarity"] < 0.58):
+    similarity_threshold = 0.55 if paper_id is None else 0.50
+    if not chunks or (chunks and chunks[0]["similarity"] < similarity_threshold):
         total_time = time.perf_counter() - total_start_time
-        print(f"[RAG] No sufficient match (highest similarity < 0.58). Query took {total_time:.3f}s.", flush=True)
+        highest_sim = chunks[0]["similarity"] if chunks else 0.0
+        print(f"[RAG] No sufficient match (highest similarity {highest_sim:.4f} < {similarity_threshold}). Query took {total_time:.3f}s.", flush=True)
         return {
             "question": question,
             "answer": "The available papers do not contain enough information to answer this question.",
@@ -174,7 +180,8 @@ def generate_rag_answer(
     # 6. Build Grounded Prompt
     system_instruction = (
         "You are a research paper assistant. Synthesize a concise, factual answer (1-2 sentences) "
-        "based strictly on the provided research paper context. Always reference the paper title and page number."
+        "based strictly on the provided research paper context. If the context does not contain the answer, "
+        "state that the provided context does not contain sufficient information. Always reference the paper title and page number."
     )
 
     prompt_user_content = (

@@ -144,9 +144,11 @@ export default function PaperQAPage({ papers }) {
 
       const data = await response.json();
       const formattedSources = (data.sources || []).map((s, idx) => ({
+        paper: s.paper,
         page: s.page,
-        chunk: idx + 1,
-        text: `Paper: ${s.paper} | Page: ${s.page} (Cosine Similarity: ${s.similarity})`
+        chunk: s.chunk_id !== undefined && s.chunk_id !== null ? s.chunk_id : idx + 1,
+        similarity: s.similarity,
+        text: s.text && s.text.trim().length > 0 ? s.text : `Paper: ${s.paper} | Page: ${s.page}`
       }));
 
       setMessages((prev) => [

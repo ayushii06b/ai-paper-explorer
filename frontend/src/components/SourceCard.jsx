@@ -18,6 +18,12 @@ export default function SourceCard({ source }) {
           <span>Page {source.page}</span>
           <span className="text-indigo-600">•</span>
           <span>Chunk {source.chunk}</span>
+          {source.similarity !== undefined && (
+            <>
+              <span className="text-indigo-600">•</span>
+              <span className="text-emerald-400 font-normal">{(source.similarity * 100).toFixed(1)}% match</span>
+            </>
+          )}
         </div>
 
         <button

@@ -3,23 +3,55 @@ from pgvector.psycopg2 import register_vector
 from src.database import get_connection
 
 
-def insert_paper(title, authors=None, year=None, category=None, pdf_path=""):
+import re
+
+
+def insert_paper(title, authors=None, year=None, category=None, pdf_path="", arxiv_id=None):
     """Inserts a paper record into the papers table and returns its generated ID."""
     conn = get_connection()
     cursor = conn.cursor()
 
     query = """
-        INSERT INTO papers (title, authors, year, category, pdf_path)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO papers (title, authors, year, category, pdf_path, arxiv_id)
+        VALUES (%s, %s, %s, %s, %s, %s)
         RETURNING id;
     """
-    cursor.execute(query, (title, authors, year, category, pdf_path))
+    cursor.execute(query, (title, authors, year, category, pdf_path, arxiv_id))
     paper_id = cursor.fetchone()[0]
 
     conn.commit()
     cursor.close()
     conn.close()
     return paper_id
+
+
+def find_paper_by_arxiv_id(arxiv_id: str):
+    """Checks if a paper with this arxiv_id or base version exists in database."""
+    if not arxiv_id:
+        return None
+    conn = get_connection()
+    cur = conn.cursor()
+    base_id = re.sub(r'v\d+$', '', arxiv_id)
+    cur.execute("""
+        SELECT id, title, authors, year, category, pdf_path, arxiv_id
+        FROM papers
+        WHERE arxiv_id = %s OR arxiv_id = %s OR title = %s OR title = %s
+        LIMIT 1;
+    """, (arxiv_id, base_id, arxiv_id, base_id))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if row:
+        return {
+            "id": row[0],
+            "title": row[1],
+            "authors": row[2],
+            "year": row[3],
+            "category": row[4],
+            "pdf_path": row[5],
+            "arxiv_id": row[6]
+        }
+    return None
 
 
 def insert_chunks(paper_id, chunks):

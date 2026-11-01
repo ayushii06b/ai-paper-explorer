@@ -36,6 +36,8 @@ class SourceItem(BaseModel):
     paper: str
     page: int
     similarity: float
+    text: Optional[str] = None
+    chunk_id: Optional[int] = None
 
 
 class AskResponse(BaseModel):
