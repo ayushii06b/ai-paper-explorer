@@ -1,28 +1,25 @@
+import re
 import numpy as np
 from pgvector.psycopg2 import register_vector
 from src.database import get_connection
 
 
-import re
-
-
 def insert_paper(title, authors=None, year=None, category=None, pdf_path="", arxiv_id=None):
     """Inserts a paper record into the papers table and returns its generated ID."""
     conn = get_connection()
-    cursor = conn.cursor()
-
-    query = """
-        INSERT INTO papers (title, authors, year, category, pdf_path, arxiv_id)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        RETURNING id;
-    """
-    cursor.execute(query, (title, authors, year, category, pdf_path, arxiv_id))
-    paper_id = cursor.fetchone()[0]
-
-    conn.commit()
-    cursor.close()
-    conn.close()
-    return paper_id
+    try:
+        with conn.cursor() as cursor:
+            query = """
+                INSERT INTO papers (title, authors, year, category, pdf_path, arxiv_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id;
+            """
+            cursor.execute(query, (title, authors, year, category, pdf_path, arxiv_id))
+            paper_id = cursor.fetchone()[0]
+            conn.commit()
+            return paper_id
+    finally:
+        conn.close()
 
 
 def find_paper_by_arxiv_id(arxiv_id: str):
@@ -30,72 +27,129 @@ def find_paper_by_arxiv_id(arxiv_id: str):
     if not arxiv_id:
         return None
     conn = get_connection()
-    cur = conn.cursor()
-    base_id = re.sub(r'v\d+$', '', arxiv_id)
-    cur.execute("""
-        SELECT id, title, authors, year, category, pdf_path, arxiv_id
-        FROM papers
-        WHERE arxiv_id = %s OR arxiv_id = %s OR title = %s OR title = %s
-        LIMIT 1;
-    """, (arxiv_id, base_id, arxiv_id, base_id))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    if row:
-        return {
-            "id": row[0],
-            "title": row[1],
-            "authors": row[2],
-            "year": row[3],
-            "category": row[4],
-            "pdf_path": row[5],
-            "arxiv_id": row[6]
-        }
-    return None
+    try:
+        with conn.cursor() as cur:
+            base_id = re.sub(r'v\d+$', '', arxiv_id)
+            cur.execute("""
+                SELECT id, title, authors, year, category, pdf_path, arxiv_id
+                FROM papers
+                WHERE arxiv_id = %s OR arxiv_id = %s OR title = %s OR title = %s
+                LIMIT 1;
+            """, (arxiv_id, base_id, arxiv_id, base_id))
+            row = cur.fetchone()
+            if row:
+                return {
+                    "id": row[0],
+                    "title": row[1],
+                    "authors": row[2],
+                    "year": row[3],
+                    "category": row[4],
+                    "pdf_path": row[5],
+                    "arxiv_id": row[6]
+                }
+            return None
+    finally:
+        conn.close()
 
 
 def insert_chunks(paper_id, chunks):
     """Inserts chunk text, page numbers, indices, and vector embeddings into paper_chunks."""
+    if not chunks:
+        return
     conn = get_connection()
-    register_vector(conn)
-    cursor = conn.cursor()
+    try:
+        register_vector(conn)
+        with conn.cursor() as cursor:
+            query = """
+                INSERT INTO paper_chunks (paper_id, chunk_id, chunk_text, page_number, chunk_index, embedding)
+                VALUES (%s, %s, %s, %s, %s, %s);
+            """
 
-    query = """
-        INSERT INTO paper_chunks (paper_id, chunk_id, chunk_text, page_number, chunk_index, embedding)
-        VALUES (%s, %s, %s, %s, %s, %s);
+            records = []
+            for idx, chunk in enumerate(chunks):
+                embedding_val = np.array(chunk["embedding"], dtype=np.float32)
+                records.append((
+                    paper_id,
+                    chunk["chunk_id"],
+                    chunk["text"],
+                    chunk["page"],
+                    idx,
+                    embedding_val
+                ))
+
+            cursor.executemany(query, records)
+            conn.commit()
+            print(f"Successfully inserted {len(chunks)} chunks into paper_chunks for paper_id={paper_id}.")
+    finally:
+        conn.close()
+
+
+def insert_paper_with_chunks(title, authors, year, category, pdf_path, arxiv_id, chunks):
     """
+    Inserts paper metadata and all chunks atomically within a single database transaction.
+    If chunk insertion fails, the transaction is rolled back and no partial/orphaned
+    paper is left in the database.
+    """
+    conn = get_connection()
+    try:
+        register_vector(conn)
+        with conn.cursor() as cursor:
+            paper_query = """
+                INSERT INTO papers (title, authors, year, category, pdf_path, arxiv_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id;
+            """
+            cursor.execute(paper_query, (title, authors, year, category, pdf_path, arxiv_id))
+            paper_id = cursor.fetchone()[0]
 
-    records = []
-    for idx, chunk in enumerate(chunks):
-        embedding_val = np.array(chunk["embedding"], dtype=np.float32)
-        records.append((
-            paper_id,
-            chunk["chunk_id"],
-            chunk["text"],
-            chunk["page"],
-            idx,
-            embedding_val
-        ))
+            if chunks:
+                chunk_query = """
+                    INSERT INTO paper_chunks (paper_id, chunk_id, chunk_text, page_number, chunk_index, embedding)
+                    VALUES (%s, %s, %s, %s, %s, %s);
+                """
+                records = []
+                for idx, chunk in enumerate(chunks):
+                    embedding_val = np.array(chunk["embedding"], dtype=np.float32)
+                    records.append((
+                        paper_id,
+                        chunk["chunk_id"],
+                        chunk["text"],
+                        chunk["page"],
+                        idx,
+                        embedding_val
+                    ))
+                cursor.executemany(chunk_query, records)
 
-    cursor.executemany(query, records)
-    conn.commit()
+            conn.commit()
+            print(f"Successfully committed paper_id={paper_id} with {len(chunks)} chunks atomically.")
+            return paper_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
-    cursor.close()
-    conn.close()
-    print(f"Successfully inserted {len(chunks)} chunks into paper_chunks for paper_id={paper_id}.")
+
+def delete_paper_by_id(paper_id: int):
+    """Deletes a paper record and cascades chunk removal."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM papers WHERE id = %s;", (paper_id,))
+            conn.commit()
+    finally:
+        conn.close()
 
 
 def get_paper_chunks_count(paper_id):
     """Returns the total number of chunks stored for a paper."""
     conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT COUNT(*) FROM paper_chunks WHERE paper_id = %s;", (paper_id,))
-    count = cursor.fetchone()[0]
-
-    cursor.close()
-    conn.close()
-    return count
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM paper_chunks WHERE paper_id = %s;", (paper_id,))
+            return cursor.fetchone()[0]
+    finally:
+        conn.close()
 
 
 def verify_embeddings(paper_id):
@@ -103,32 +157,30 @@ def verify_embeddings(paper_id):
     Verifies that embeddings are stored properly in PostgreSQL and returns sample record details.
     """
     conn = get_connection()
-    register_vector(conn)
-    cursor = conn.cursor()
+    try:
+        register_vector(conn)
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT chunk_id, page_number, chunk_index, length(chunk_text), embedding
+                FROM paper_chunks
+                WHERE paper_id = %s
+                ORDER BY chunk_index ASC
+                LIMIT 3;
+            """, (paper_id,))
 
-    # Query total count and sample vector values
-    cursor.execute("""
-        SELECT chunk_id, page_number, chunk_index, length(chunk_text), embedding
-        FROM paper_chunks
-        WHERE paper_id = %s
-        ORDER BY chunk_index ASC
-        LIMIT 3;
-    """, (paper_id,))
-
-    rows = cursor.fetchall()
-    samples = []
-    for row in rows:
-        c_id, page, c_idx, text_len, emb = row
-        emb_arr = np.array(emb, dtype=np.float32)
-        samples.append({
-            "chunk_id": c_id,
-            "page_number": page,
-            "chunk_index": c_idx,
-            "text_length": text_len,
-            "embedding_dim": len(emb_arr),
-            "sample_vector_values": emb_arr[:5].tolist()
-        })
-
-    cursor.close()
-    conn.close()
-    return samples
+            rows = cursor.fetchall()
+            samples = []
+            for row in rows:
+                c_id, page, c_idx, text_len, emb = row
+                emb_arr = np.array(emb, dtype=np.float32)
+                samples.append({
+                    "chunk_id": c_id,
+                    "page_number": page,
+                    "chunk_index": c_idx,
+                    "text_length": text_len,
+                    "embedding_dim": len(emb_arr),
+                    "sample_vector_values": emb_arr[:5].tolist()
+                })
+            return samples
+    finally:
+        conn.close()

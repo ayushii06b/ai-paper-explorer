@@ -8,7 +8,14 @@ import xml.etree.ElementTree as ET
 from typing import List, Dict, Optional, Any
 
 from src.database import get_connection
-from src.vector_store import insert_paper, insert_chunks, find_paper_by_arxiv_id, get_paper_chunks_count
+from src.vector_store import (
+    insert_paper,
+    insert_chunks,
+    find_paper_by_arxiv_id,
+    get_paper_chunks_count,
+    insert_paper_with_chunks,
+    delete_paper_by_id
+)
 
 # Trusted arXiv domains
 ALLOWED_ARXIV_DOMAINS = {"arxiv.org", "export.arxiv.org", "www.arxiv.org"}
@@ -402,12 +409,17 @@ def process_and_ingest_paper(
     existing = find_paper_by_arxiv_id(clean_arxiv_id)
     if existing:
         chunk_count = get_paper_chunks_count(existing["id"])
-        return {
-            "paper_id": existing["id"],
-            "status": "already_exists",
-            "chunk_count": chunk_count,
-            "title": existing["title"]
-        }
+        if chunk_count > 0:
+            return {
+                "paper_id": existing["id"],
+                "status": "already_exists",
+                "chunk_count": chunk_count,
+                "title": existing["title"]
+            }
+        else:
+            # Clean up prior orphaned record with 0 chunks so it can be re-ingested cleanly
+            print(f"[Ingestion] Cleaning up orphaned paper record ID {existing['id']} (0 chunks) for re-ingestion.")
+            delete_paper_by_id(existing["id"])
 
     # 2. Download PDF
     if progress_callback:
@@ -458,18 +470,18 @@ def process_and_ingest_paper(
         progress_callback(f"Generating 768-dim vector embeddings for {len(chunks)} chunks...")
     embedded_chunks = embed_chunks(chunks)
 
-    # 7. Store in PostgreSQL + pgvector
+    # 7. Store in PostgreSQL + pgvector atomically
     if progress_callback:
         progress_callback("Storing paper metadata and vectors into PostgreSQL...")
-    paper_id = insert_paper(
+    paper_id = insert_paper_with_chunks(
         title=title or clean_arxiv_id,
         authors=authors,
         year=year,
         category=category,
         pdf_path=pdf_path,
-        arxiv_id=clean_arxiv_id
+        arxiv_id=clean_arxiv_id,
+        chunks=embedded_chunks
     )
-    insert_chunks(paper_id=paper_id, chunks=embedded_chunks)
 
     if progress_callback:
         progress_callback("Paper preparation complete!")

@@ -1,0 +1,13 @@
+.git
+.gitignore
+.env
+.env.*
+*.pyc
+__pycache__/
+frontend/
+Data/papers/
+Data/downloaded_papers/
+scratch/
+test_*.py
+.venv
+venv

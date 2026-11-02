@@ -1,101 +1,105 @@
 import os
 import time
-import threading
 import traceback
+import threading
+from typing import Optional, List, Dict, Any
 
-# Ensure HuggingFace loads locally without network delays
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
-
+from groq import Groq
 from src.retrieval import search_similar_chunks
 
-# Model identifier
-MODEL_ID = "LiquidAI/LFM2.5-1.2B-Instruct"
 
-# Configurable token generation limit for local CPU inference
-DEFAULT_MAX_NEW_TOKENS = int(os.environ.get("MAX_NEW_TOKENS", "40"))
+# --------------------------------------------------
+# 1. MODEL CONFIGURATION
+# --------------------------------------------------
 
-# Global lazy-loaded singleton instances and concurrency locks
-_tokenizer = None
-_model = None
-_model_failed = False
-_model_lock = threading.Lock()
-_generate_lock = threading.Lock()
+# Primary verified Groq models for research QA
+DEFAULT_GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
+FALLBACK_GROQ_MODELS = ["openai/gpt-oss-20b", "allam-2-7b"]
+
+DEFAULT_MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "700"))
+LOCAL_MODEL_ID = "LiquidAI/LFM2.5-1.2B-Instruct"
+
+_groq_client = None
+_client_lock = threading.Lock()
+
+_local_model = None
+_local_tokenizer = None
+_local_lock = threading.Lock()
 
 
-def load_model():
-    """
-    Loads and caches the local LLM tokenizer and model thread-safely.
-    Reuses existing instances if already loaded.
-    """
-    global _tokenizer, _model, _model_failed
+# --------------------------------------------------
+# 2. CLIENT AND MODEL LOADERS
+# --------------------------------------------------
 
-    if _model_failed:
-        return None, None
+def get_groq_client() -> Optional[Groq]:
+    """Create and cache the Groq client thread-safely."""
+    global _groq_client
+    if _groq_client is not None:
+        return _groq_client
 
-    if _tokenizer is not None and _model is not None:
-        return _tokenizer, _model
-
-    with _model_lock:
-        if _tokenizer is not None and _model is not None:
-            return _tokenizer, _model
-
-        try:
-            print(f"[RAG] Loading local LLM model and tokenizer: {MODEL_ID}...", flush=True)
-            t0 = time.perf_counter()
+    with _client_lock:
+        if _groq_client is None:
+            api_key = os.getenv("GROQ_API_KEY")
+            if not api_key or not api_key.strip():
+                print("[RAG Warning] GROQ_API_KEY is not configured.", flush=True)
+                return None
             try:
-                _tokenizer = AutoTokenizer.from_pretrained(
-                    MODEL_ID,
-                    trust_remote_code=True,
+                _groq_client = Groq(api_key=api_key.strip())
+            except Exception as e:
+                print(f"[RAG Warning] Failed to initialize Groq client: {e}", flush=True)
+                return None
+
+    return _groq_client
+
+
+def get_local_llm():
+    """Lazily load the local LiquidAI LFM2.5-1.2B-Instruct model on CPU as fallback."""
+    global _local_model, _local_tokenizer
+    if _local_model is not None and _local_tokenizer is not None:
+        return _local_model, _local_tokenizer
+
+    with _local_lock:
+        if _local_model is None or _local_tokenizer is None:
+            import torch
+            from transformers import AutoTokenizer, AutoModelForCausalLM
+
+            print(f"[RAG Local LLM] Initializing local fallback model ({LOCAL_MODEL_ID})...", flush=True)
+            t0 = time.time()
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(LOCAL_MODEL_ID, local_files_only=True)
+                model = AutoModelForCausalLM.from_pretrained(
+                    LOCAL_MODEL_ID,
+                    torch_dtype=torch.float32,
                     local_files_only=True
                 )
-                _model = AutoModelForCausalLM.from_pretrained(
-                    MODEL_ID,
-                    dtype=torch.bfloat16,
-                    trust_remote_code=True,
-                    local_files_only=True,
-                    low_cpu_mem_usage=True
-                )
             except Exception:
-                # If local_files_only fails, try standard load
-                _tokenizer = AutoTokenizer.from_pretrained(
-                    MODEL_ID,
-                    trust_remote_code=True
+                tokenizer = AutoTokenizer.from_pretrained(LOCAL_MODEL_ID)
+                model = AutoModelForCausalLM.from_pretrained(
+                    LOCAL_MODEL_ID,
+                    torch_dtype=torch.float32
                 )
-                _model = AutoModelForCausalLM.from_pretrained(
-                    MODEL_ID,
-                    dtype=torch.bfloat16,
-                    trust_remote_code=True,
-                    low_cpu_mem_usage=True
-                )
+            _local_tokenizer = tokenizer
+            _local_model = model
+            print(f"[RAG Local LLM] Local model loaded in {time.time() - t0:.2f}s.", flush=True)
 
-            _model.eval()
-            load_elapsed = time.perf_counter() - t0
-            print(f"[RAG] Local LLM model loaded successfully in {load_elapsed:.2f}s.", flush=True)
-            return _tokenizer, _model
-        except Exception as e:
-            print(f"[RAG Error] Failed to load local LLM model ({e}). RAG will run in fallback mode.", flush=True)
-            traceback.print_exc()
-            _model_failed = True
-            return None, None
+    return _local_model, _local_tokenizer
 
 
-def construct_context(chunks, max_chunk_chars: int = 1400) -> str:
-    """
-    Formats retrieved chunks into a clean context string for prompt.
-    Includes Paper title, Page number, and Chunk text.
-    Limits individual chunk length to avoid excessive prefill latency on CPU.
-    """
+# --------------------------------------------------
+# 3. CONTEXT CONSTRUCTION
+# --------------------------------------------------
+
+def construct_context(chunks: List[Dict[str, Any]], max_chunk_chars: int = 1500) -> str:
+    """Format retrieved paper chunks into structured context blocks for the LLM."""
     context_blocks = []
+
     for idx, chunk in enumerate(chunks, start=1):
-        clean_text = chunk["text"].strip().replace("\n", " ")
+        clean_text = chunk["text"].strip().replace("\r\n", "\n")
         if len(clean_text) > max_chunk_chars:
             clean_text = clean_text[:max_chunk_chars].rstrip() + "..."
+
         block = (
-            f"[Source {idx} | Paper: {chunk['title']} | Page: {chunk['page']}]\n"
+            f"[Passage {idx} | Paper: \"{chunk['title']}\" | Page: {chunk['page']}]\n"
             f"{clean_text}"
         )
         context_blocks.append(block)
@@ -103,170 +107,243 @@ def construct_context(chunks, max_chunk_chars: int = 1400) -> str:
     return "\n\n".join(context_blocks)
 
 
+# --------------------------------------------------
+# 4. LOCAL GENERATION FALLBACK
+# --------------------------------------------------
+
+def generate_local_answer(context_str: str, question: str, max_tokens: int = 350) -> str:
+    """Infers answer using the local LiquidAI LFM2.5-1.2B-Instruct model on CPU."""
+    import torch
+    model, tokenizer = get_local_llm()
+
+    system_text = (
+        "You are an expert AI research assistant. Provide an accurate, grounded answer "
+        "to the question based strictly on the provided research context. Cite paper and page numbers."
+    )
+    user_text = f"Context:\n{context_str}\n\nQuestion: {question}\n\nAnswer:"
+
+    messages = [
+        {"role": "system", "content": system_text},
+        {"role": "user", "content": user_text}
+    ]
+
+    prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer(prompt, return_tensors="pt")
+
+    with torch.no_grad():
+        output_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_tokens,
+            do_sample=False,
+            pad_token_id=tokenizer.eos_token_id
+        )
+
+    new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
+    return tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+
+
+# --------------------------------------------------
+# 5. MAIN RAG ANSWER PIPELINE
+# --------------------------------------------------
+
 def generate_rag_answer(
     question: str,
-    top_k: int = 2,
-    paper_id: int | None = None,
-    max_new_tokens: int | None = None
-) -> dict:
+    top_k: int = 3,
+    paper_id: Optional[int] = None,
+    max_new_tokens: Optional[int] = None
+) -> Dict[str, Any]:
     """
-    Executes full RAG pipeline:
-    1. Semantic similarity retrieval via search_similar_chunks()
-    2. Context construction
-    3. Grounded LLM answer generation with timing logs
-    4. Source attribution mapping
+    Executes the grounded RAG question-answering workflow:
+    1. Query embedding and similarity search via pgvector.
+    2. Context verification and similarity threshold validation.
+    3. Multi-tier LLM generation (Primary: Groq Cloud; Secondary: Local LiquidAI).
+    4. Citations grounding and structured error reporting.
     """
     total_start_time = time.perf_counter()
 
-    # Determine token limit
-    gen_tokens_limit = max_new_tokens if max_new_tokens is not None else DEFAULT_MAX_NEW_TOKENS
-    gen_tokens_limit = max(10, min(gen_tokens_limit, 100))
+    # Normalize question
+    clean_question = (question or "").strip()
+    if not clean_question:
+        return {
+            "question": "",
+            "answer": "Please provide a valid question about the research paper.",
+            "sources": [],
+            "status": "insufficient_context",
+            "model": None
+        }
 
-    # 1. Retrieve top-k relevant chunks
+    gen_tokens_limit = max_new_tokens if max_new_tokens is not None else DEFAULT_MAX_NEW_TOKENS
+    gen_tokens_limit = max(50, min(gen_tokens_limit, 1000))
+
+    # STEP 1: RETRIEVE RELEVANT CHUNKS
     t_retrieval_start = time.perf_counter()
-    chunks = search_similar_chunks(question, top_k=top_k, paper_id=paper_id)
+    chunks = search_similar_chunks(
+        clean_question,
+        top_k=max(top_k, 3),
+        paper_id=paper_id
+    )
     retrieval_elapsed = time.perf_counter() - t_retrieval_start
 
-    # 2. Extract sources
+    # STEP 2: PREPARE CITATION SOURCES
     sources = []
     seen_chunks = set()
+
     for chunk in chunks:
         cid = chunk.get("chunk_id")
         if cid is not None and cid in seen_chunks:
             continue
         if cid is not None:
             seen_chunks.add(cid)
+
         sources.append({
             "paper": chunk["title"],
             "page": chunk["page"],
             "similarity": round(float(chunk["similarity"]), 4),
             "text": chunk.get("text", "").strip(),
-            "chunk_id": chunk.get("chunk_id")
+            "chunk_id": cid
         })
 
-    # 3. Check context availability / similarity threshold
-    similarity_threshold = 0.55 if paper_id is None else 0.50
-    if not chunks or (chunks and chunks[0]["similarity"] < similarity_threshold):
-        total_time = time.perf_counter() - total_start_time
-        highest_sim = chunks[0]["similarity"] if chunks else 0.0
-        print(f"[RAG] No sufficient match (highest similarity {highest_sim:.4f} < {similarity_threshold}). Query took {total_time:.3f}s.", flush=True)
+    # STEP 3: CHECK RETRIEVAL QUALITY THRESHOLD
+    similarity_threshold = 0.50 if paper_id is not None else 0.52
+    if not chunks or chunks[0]["similarity"] < similarity_threshold:
+        paper_context_str = f" in paper ID {paper_id}" if paper_id else ""
+        print(
+            f"[RAG Notice] Retrieval similarity ({chunks[0]['similarity'] if chunks else 0.0:.4f}) "
+            f"below threshold ({similarity_threshold}){paper_context_str}. Returning insufficient context notice.",
+            flush=True
+        )
         return {
-            "question": question,
-            "answer": "The available papers do not contain enough information to answer this question.",
-            "sources": sources
+            "question": clean_question,
+            "answer": (
+                "The available research paper passages do not contain enough information "
+                "to answer this question."
+            ),
+            "sources": sources,
+            "status": "insufficient_context",
+            "model": None
         }
 
-    # 4. Construct context
-    t_prompt_start = time.perf_counter()
+    # STEP 4: CONSTRUCT GROUNDED CONTEXT
     context_str = construct_context(chunks)
 
-    # 5. Load model (cached singleton)
-    tokenizer, model = load_model()
-
-    if model is None or tokenizer is None:
-        total_time = time.perf_counter() - total_start_time
-        print(f"[RAG] Model unavailable. Providing retrieved source summary. Query took {total_time:.3f}s.", flush=True)
-        top_src = chunks[0]
-        return {
-            "question": question,
-            "answer": (
-                f"Based on {top_src['title']} (Page {top_src['page']}): "
-                f"{top_src['text'].strip()[:300]}... "
-                "(Local synthesis model currently offline; displaying retrieved grounded passage)."
-            ),
-            "sources": sources
-        }
-
-    # 6. Build Grounded Prompt
+    # STEP 5: PREPARE EDUCATIONAL RESEARCH ASSISTANT PROMPT
     system_instruction = (
-        "You are a research paper assistant. Synthesize a concise, factual answer (1-2 sentences) "
-        "based strictly on the provided research paper context. If the context does not contain the answer, "
-        "state that the provided context does not contain sufficient information. Always reference the paper title and page number."
+        "You are an expert AI research assistant. Your task is to provide clear, accurate, and educational answers "
+        "to questions about research papers based strictly on the provided context.\n\n"
+        "Guidelines:\n"
+        "1. Explain technical concepts in simple, intuitive terms first, then explain the technical mechanics.\n"
+        "2. When explaining mechanisms (e.g., self-attention, multi-head attention, positional encoding), "
+        "break down the key components (such as queries, keys, values, dimensions, attention scores).\n"
+        "3. Use clear paragraphs and bullet points where helpful to organize complex explanations.\n"
+        "4. Preserve mathematical notations and formulas when relevant (e.g., Attention(Q, K, V)).\n"
+        "5. Accurately cite the paper title and specific page numbers for your claims based on the passages.\n"
+        "6. If the provided context does not contain enough information to fully answer the question, clearly state "
+        "what is and is not covered. Never fabricate facts, external citations, or information outside the passages."
     )
 
     prompt_user_content = (
         f"Research Paper Context:\n{context_str}\n\n"
-        f"Question: {question}\n\n"
-        f"Grounded Answer:"
+        f"Question: {clean_question}\n\n"
+        "Grounded Answer:"
     )
 
-    messages = [
-        {"role": "system", "content": system_instruction},
-        {"role": "user", "content": prompt_user_content}
-    ]
+    answer_text = None
+    used_model = None
+    generation_error = None
 
-    try:
-        chat_prompt = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
-        inputs = tokenizer(chat_prompt, return_tensors="pt")
-        input_token_count = inputs.input_ids.shape[1]
-        prompt_elapsed = time.perf_counter() - t_prompt_start
+    # STEP 6: PRIMARY TIER — GROQ GENERATION
+    groq_client = get_groq_client()
+    if groq_client is not None:
+        candidate_models = [DEFAULT_GROQ_MODEL]
+        for m in FALLBACK_GROQ_MODELS:
+            if m not in candidate_models:
+                candidate_models.append(m)
 
-        # 7. Model Inference (serialized to prevent CPU cache thrashing)
-        t_infer_start = time.perf_counter()
-        with _generate_lock:
-            with torch.inference_mode():
-                outputs = model.generate(
-                    **inputs,
-                    max_new_tokens=gen_tokens_limit,
-                    do_sample=False,
-                    use_cache=True,
-                    pad_token_id=tokenizer.eos_token_id
+        for candidate_model in candidate_models:
+            try:
+                print(f"[RAG Generation] Attempting generation with Groq model '{candidate_model}'...", flush=True)
+                t_gen_start = time.perf_counter()
+
+                response = groq_client.chat.completions.create(
+                    model=candidate_model,
+                    messages=[
+                        {"role": "system", "content": system_instruction},
+                        {"role": "user", "content": prompt_user_content}
+                    ],
+                    temperature=0.2,
+                    max_tokens=gen_tokens_limit
                 )
 
-        infer_elapsed = time.perf_counter() - t_infer_start
+                gen_elapsed = time.perf_counter() - t_gen_start
+                choice = response.choices[0]
+                message = choice.message
+                content = (message.content or "").strip()
 
-        # Extract only generated new tokens
-        generated_tokens = outputs[0][input_token_count:]
-        new_token_count = len(generated_tokens)
-        speed = new_token_count / max(infer_elapsed, 0.001)
+                # Some reasoning models put output in reasoning if max_tokens was tight
+                if not content and getattr(message, "reasoning", None):
+                    content = str(message.reasoning).strip()
 
-        answer_text = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+                if content:
+                    answer_text = content
+                    used_model = candidate_model
+                    print(
+                        f"[RAG Success] Generated answer via Groq ({candidate_model}) in {gen_elapsed:.2f}s "
+                        f"({response.usage.completion_tokens if hasattr(response, 'usage') and response.usage else '?'} tokens).",
+                        flush=True
+                    )
+                    break
+                else:
+                    print(f"[RAG Warning] Groq model '{candidate_model}' returned empty content.", flush=True)
 
-        # If thinking tags were included, strip reasoning preamble
-        if "</think>" in answer_text:
-            answer_text = answer_text.split("</think>")[-1].strip()
+            except Exception as cand_err:
+                generation_error = cand_err
+                print(f"[RAG Warning] Groq candidate model '{candidate_model}' failed: {cand_err}", flush=True)
 
-        # Clean trailing incomplete citation if cut off at token limit
-        if "(" in answer_text and not answer_text.endswith(")"):
-            last_open = answer_text.rfind("(")
-            if ")" not in answer_text[last_open:]:
-                answer_text = answer_text[:last_open].strip()
-                if not answer_text.endswith("."):
-                    answer_text += f" (as described in {chunks[0]['title']}, page {chunks[0]['page']})."
-
-        if not answer_text:
-            top_src = chunks[0]
-            answer_text = (
-                f"According to {top_src['title']} (Page {top_src['page']}): "
-                f"{top_src['text'].strip()[:250]}..."
+    # STEP 7: SECONDARY TIER — LOCAL LIQUIDAI FALLBACK
+    if not answer_text:
+        print("[RAG Notice] Groq unavailable or failed. Attempting local model fallback...", flush=True)
+        try:
+            t_loc_start = time.perf_counter()
+            answer_text = generate_local_answer(
+                context_str=context_str,
+                question=clean_question,
+                max_tokens=min(gen_tokens_limit, 400)
             )
+            used_model = f"local:{LOCAL_MODEL_ID}"
+            print(f"[RAG Success] Generated answer via Local LLM in {time.perf_counter() - t_loc_start:.2f}s.", flush=True)
+        except Exception as local_err:
+            print(f"[RAG Error] Local LLM fallback generation failed: {local_err}", flush=True)
+            generation_error = local_err
 
-        total_elapsed = time.perf_counter() - total_start_time
+    # STEP 8: FINAL DISPOSITION
+    total_elapsed = time.perf_counter() - total_start_time
 
+    if answer_text:
         print(
-            f"[RAG Timing] Retrieval: {retrieval_elapsed:.3f}s | "
-            f"Prompt ({input_token_count} toks): {prompt_elapsed:.3f}s | "
-            f"Inference: {infer_elapsed:.2f}s ({new_token_count} toks, {speed:.2f} tok/s) | "
-            f"Total: {total_elapsed:.2f}s",
+            f"[RAG Pipeline Timing] Retrieval: {retrieval_elapsed:.3f}s | "
+            f"Total: {total_elapsed:.2f}s | Model: {used_model}",
             flush=True
         )
+        return {
+            "question": clean_question,
+            "answer": answer_text,
+            "sources": sources,
+            "status": "success",
+            "model": used_model
+        }
 
-    except Exception as err:
-        print(f"[RAG Error] Error during LLM generation: {err}", flush=True)
-        traceback.print_exc()
-        top_src = chunks[0]
-        answer_text = (
-            f"Based on {top_src['title']} (Page {top_src['page']}): "
-            f"{top_src['text'].strip()[:350]}... "
-            "(Grounded context retrieved from database; synthesis encountered an inference error)."
-        )
+    # If generation failed completely across all tiers, DO NOT fake an answer using chunks
+    print(f"[RAG Error] All generation tiers failed. Reason: {generation_error}", flush=True)
+    traceback.print_exc()
 
     return {
-        "question": question,
-        "answer": answer_text,
-        "sources": sources
+        "question": clean_question,
+        "answer": (
+            "AI answer generation is currently unavailable due to an inference service issue. "
+            "The retrieved passages are provided below for your reference."
+        ),
+        "sources": sources,
+        "status": "llm_failed",
+        "error": str(generation_error),
+        "model": None
     }

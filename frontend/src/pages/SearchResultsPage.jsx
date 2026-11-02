@@ -16,17 +16,25 @@ import {
   RefreshCw,
   Tag,
   Calendar,
-  Layers,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  Search,
+  Quote
 } from 'lucide-react';
 import SearchBar from '../components/SearchBar';
 import PaperCard from '../components/PaperCard';
 import EmptyState from '../components/EmptyState';
-import { MOCK_PAPERS, MOCK_CATEGORIES, MOCK_YEARS } from '../data/mockPapers';
+import LoadingState from '../components/LoadingState';
 import { API_BASE_URL } from '../config/api';
 
-export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave }) {
+export default function SearchResultsPage({
+  papers = [],
+  isLoading = false,
+  backendError = null,
+  onRetry,
+  savedPaperIds = [],
+  onToggleSave
+}) {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
 
@@ -36,7 +44,7 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
   const [activeTab, setActiveTab] = useState(tabParam === 'arxiv' ? 'arxiv' : 'local');
   const [query, setQuery] = useState(initialQuery);
 
-  // Sync activeTab if URL changes
+  // Sync activeTab and query if URL changes
   useEffect(() => {
     const currentTab = searchParams.get('tab') || 'local';
     setActiveTab(currentTab === 'arxiv' ? 'arxiv' : 'local');
@@ -62,19 +70,19 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
   };
 
   // ==========================================
-  // LOCAL LIBRARY SEARCH STATE
+  // LOCAL LIBRARY STATE & FILTERING
   // ==========================================
-  const paperList = papers && papers.length > 0 ? papers : MOCK_PAPERS;
+  const paperList = papers || [];
   const [selectedCategory, setSelectedCategory] = useState('All Categories');
   const [selectedYear, setSelectedYear] = useState('All Years');
   const [sortBy, setSortBy] = useState('relevance');
-  const [vectorResults, setVectorResults] = useState([]);
-  const [isSearchingVector, setIsSearchingVector] = useState(false);
+  const [passageResults, setPassageResults] = useState([]);
+  const [isSearchingPassages, setIsSearchingPassages] = useState(false);
 
   // Dynamically compute unique categories from live papers
   const availableCategories = useMemo(() => {
     const cats = new Set(['All Categories']);
-    ['Natural Language Processing', 'Computer Vision', 'Artificial Intelligence', 'Machine Learning', 'Information Retrieval & RAG', 'Robotics'].forEach((c) =>
+    ['Natural Language Processing', 'Computer Vision', 'Artificial Intelligence', 'Machine Learning', 'Robotics'].forEach((c) =>
       cats.add(c)
     );
     paperList.forEach((paper) => {
@@ -96,15 +104,15 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
     });
   }, [paperList]);
 
-  // Perform live dense vector search against FastAPI /api/search when query changes (Local tab)
+  // Perform smart search for passages against FastAPI /api/search when query changes (Library tab)
   useEffect(() => {
     if (activeTab !== 'local' || !query.trim()) {
-      setVectorResults([]);
+      setPassageResults([]);
       return;
     }
 
     let isCurrent = true;
-    setIsSearchingVector(true);
+    setIsSearchingPassages(true);
 
     fetch(`${API_BASE_URL}/api/search`, {
       method: 'POST',
@@ -114,15 +122,15 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
       .then((res) => (res.ok ? res.json() : []))
       .then((data) => {
         if (isCurrent && Array.isArray(data)) {
-          setVectorResults(data);
+          setPassageResults(data);
         }
       })
       .catch((err) => {
-        console.warn('Backend vector search not reachable:', err);
-        if (isCurrent) setVectorResults([]);
+        console.warn('Backend search not reachable:', err);
+        if (isCurrent) setPassageResults([]);
       })
       .finally(() => {
-        if (isCurrent) setIsSearchingVector(false);
+        if (isCurrent) setIsSearchingPassages(false);
       });
 
     return () => {
@@ -135,10 +143,10 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
       const q = query.toLowerCase().trim();
       const matchesQuery =
         !q ||
-        paper.title.toLowerCase().includes(q) ||
-        paper.abstract.toLowerCase().includes(q) ||
-        paper.authors.toLowerCase().includes(q) ||
-        paper.category.toLowerCase().includes(q);
+        (paper.title && paper.title.toLowerCase().includes(q)) ||
+        (paper.abstract && paper.abstract.toLowerCase().includes(q)) ||
+        (paper.authors && paper.authors.toLowerCase().includes(q)) ||
+        (paper.category && paper.category.toLowerCase().includes(q));
 
       const matchesCategory =
         selectedCategory === 'All Categories' ||
@@ -157,10 +165,10 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
 
       return matchesQuery && matchesCategory && matchesYear;
     }).sort((a, b) => {
-      if (sortBy === 'year-desc') return b.year - a.year;
-      if (sortBy === 'year-asc') return a.year - b.year;
-      if (sortBy === 'title') return a.title.localeCompare(b.title);
-      return 0; // default relevance order
+      if (sortBy === 'year-desc') return (b.year || 0) - (a.year || 0);
+      if (sortBy === 'year-asc') return (a.year || 0) - (b.year || 0);
+      if (sortBy === 'title') return (a.title || '').localeCompare(b.title || '');
+      return 0; // default order
     });
   }, [paperList, query, selectedCategory, selectedYear, sortBy]);
 
@@ -205,7 +213,7 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
       })
       .catch((err) => {
         console.warn('arXiv search error:', err);
-        setArxivError('Unable to connect to arXiv search service. Check if backend is online.');
+        setArxivError('Unable to connect to the arXiv service. Please verify your backend server is running.');
         setArxivPapers([]);
       })
       .finally(() => {
@@ -234,7 +242,7 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
       ...prev,
       [arxivId]: {
         status: 'processing',
-        progress: 'Initiating paper download from arXiv...',
+        progress: 'Downloading paper PDF from arXiv...',
         error: null,
         paper_id: null
       }
@@ -265,15 +273,16 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
           ...prev,
           [arxivId]: {
             status: 'completed',
-            progress: 'Paper ready for Q&A!',
+            progress: 'Paper ready for reading and questions!',
             paper_id: initData.paper_id,
             error: null
           }
         }));
-        // Mark paper as ingested in state
         setArxivPapers((prev) =>
           prev.map((p) => (p.arxiv_id === arxivId ? { ...p, is_ingested: true, local_paper_id: initData.paper_id } : p))
         );
+        // Refresh paper list in App if possible
+        if (onRetry) onRetry();
         return;
       }
 
@@ -295,7 +304,6 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
             if (statusData.status === 'completed') {
               clearInterval(pollingIntervals.current[arxivId]);
               delete pollingIntervals.current[arxivId];
-              // Update paper item in current list
               setArxivPapers((prev) =>
                 prev.map((p) =>
                   p.arxiv_id === arxivId
@@ -303,6 +311,7 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
                     : p
                 )
               );
+              if (onRetry) onRetry();
             } else if (statusData.status === 'failed') {
               clearInterval(pollingIntervals.current[arxivId]);
               delete pollingIntervals.current[arxivId];
@@ -327,75 +336,84 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
   };
 
   const sampleArxivSuggestions = [
-    { label: 'Attention Is All You Need', q: '1706.03762' },
-    { label: 'Retrieval Augmented Generation', q: 'retrieval augmented generation' },
-    { label: 'Vision Transformers', q: 'vision transformers' },
-    { label: 'LoRA Fine-Tuning', q: '2106.09685' },
-    { label: 'Deep Residual Learning', q: '1512.03385' }
+    { label: 'Attention Mechanisms', q: 'attention transformer' },
+    { label: 'Residual Networks', q: 'deep residual learning' },
+    { label: 'Language Models', q: 'large language models' },
+    { label: 'Vision Transformers', q: 'vision transformer' },
+    { label: 'Model Adaptation', q: 'low-rank adaptation' }
   ];
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+      
       {/* Header & Main Search */}
       <div className="space-y-4">
-        <div className="flex items-center gap-2 text-indigo-400 font-semibold text-xs uppercase tracking-wider">
+        <div className="flex items-center gap-2 text-teal-400 font-semibold text-xs uppercase tracking-wider">
           <BookOpen className="w-4 h-4" />
           <span>Research Discovery Engine</span>
         </div>
-        <h1 className="text-3xl font-extrabold text-slate-100 tracking-tight">
+        <h1 className="text-2xl sm:text-4xl font-extrabold text-slate-100 tracking-tight">
           Explore Research Papers
         </h1>
-
-        {/* Tab Switcher: Local Library vs arXiv External */}
-        <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
-          <button
-            onClick={() => handleTabChange('local')}
-            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
-              activeTab === 'local'
-                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-            }`}
-          >
-            <BookOpen className="w-4 h-4" />
-            <span>Local Vector Library ({paperList.length})</span>
-          </button>
-
-          <button
-            onClick={() => handleTabChange('arxiv')}
-            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
-              activeTab === 'arxiv'
-                ? 'bg-purple-600 text-white shadow-lg shadow-purple-600/30'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-            }`}
-          >
-            <Globe className="w-4 h-4 text-purple-300" />
-            <span>arXiv Global Explorer</span>
-            <span className="px-1.5 py-0.2 text-[10px] rounded bg-purple-400/20 text-purple-200 border border-purple-400/30">
-              Live API
-            </span>
-          </button>
-        </div>
+        <p className="text-xs sm:text-sm text-slate-400 max-w-2xl">
+          Search your library collection or discover millions of open-access papers across the arXiv repository.
+        </p>
 
         {/* Search Bar */}
-        <div className="max-w-4xl space-y-2">
+        <div className="pt-2">
           <SearchBar
             value={query}
-            onChange={(val) => {
-              setQuery(val);
-              handleSearchSubmit(val);
-            }}
+            onChange={setQuery}
             onSearch={handleSearchSubmit}
             placeholder={
               activeTab === 'arxiv'
-                ? 'Search arXiv papers by topic, title, author, or ID (e.g. 1706.03762, RAG)...'
-                : 'Search local library by concept, model, or title (e.g. 768-dim, embeddings)...'
+                ? "Search millions of papers on arXiv by topic, title, or arXiv ID..."
+                : "Search your library by topic, methodology, title, or question..."
             }
+            size="lg"
           />
+        </div>
 
-          {/* Quick Suggestions for arXiv */}
+        {/* Tab Switcher & Quick Suggestions */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2">
+          <div className="inline-flex p-1 rounded-2xl bg-[#101625] border border-slate-800 self-start">
+            <button
+              onClick={() => handleTabChange('local')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
+                activeTab === 'local'
+                  ? 'bg-teal-600 text-white shadow-md shadow-teal-600/20'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <BookOpen className="w-4 h-4" />
+              <span>Paper Library</span>
+              <span className={`text-[11px] px-2 py-0.5 rounded-full ${
+                activeTab === 'local' ? 'bg-teal-700/60 text-white' : 'bg-slate-800 text-slate-400'
+              }`}>
+                {paperList.length}
+              </span>
+            </button>
+
+            <button
+              onClick={() => handleTabChange('arxiv')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
+                activeTab === 'arxiv'
+                  ? 'bg-teal-600 text-white shadow-md shadow-teal-600/20'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Globe className="w-4 h-4 text-emerald-400" />
+              <span>Discover on arXiv</span>
+              <span className="px-1.5 py-0.2 text-[10px] rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                Open Access
+              </span>
+            </button>
+          </div>
+
+          {/* Quick topic buttons if in arXiv mode */}
           {activeTab === 'arxiv' && (
-            <div className="flex flex-wrap items-center gap-2 pt-1 text-xs">
-              <span className="text-slate-500 font-medium">Try arXiv:</span>
+            <div className="flex flex-wrap items-center gap-1.5 text-xs">
+              <span className="text-slate-400 text-[11px]">Popular:</span>
               {sampleArxivSuggestions.map((item, idx) => (
                 <button
                   key={idx}
@@ -403,7 +421,7 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
                     setQuery(item.q);
                     handleSearchSubmit(item.q);
                   }}
-                  className="px-2.5 py-1 rounded-full bg-slate-900 border border-slate-800 hover:border-purple-500/40 text-slate-400 hover:text-purple-300 transition-colors"
+                  className="px-2.5 py-1 rounded-full bg-[#101625] border border-slate-800 hover:border-teal-500/40 text-slate-300 hover:text-teal-300 transition-colors text-[11px]"
                 >
                   {item.label}
                 </button>
@@ -414,23 +432,23 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
       </div>
 
       {/* ======================================================== */}
-      {/* TAB 1: LOCAL VECTOR LIBRARY CONTENT */}
+      {/* TAB 1: PAPER LIBRARY CONTENT */}
       {/* ======================================================== */}
       {activeTab === 'local' && (
-        <div className="space-y-8">
+        <div className="space-y-6">
           {/* Filters Bar */}
-          <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+          <div className="bg-[#101625] border border-slate-800 rounded-2xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
             {/* Category & Year Selectors */}
             <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
-              <div className="flex items-center gap-2 text-xs font-semibold text-slate-400 mr-1">
-                <Filter className="w-3.5 h-3.5" />
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-300 mr-1">
+                <Filter className="w-3.5 h-3.5 text-teal-400" />
                 <span>Filters:</span>
               </div>
 
               <select
                 value={selectedCategory}
                 onChange={(e) => setSelectedCategory(e.target.value)}
-                className="bg-slate-950 border border-slate-800 text-slate-200 text-xs rounded-xl px-3 py-2 focus:outline-none focus:border-indigo-500"
+                className="bg-[#0b0f19] border border-slate-800 text-slate-200 text-xs rounded-xl px-3 py-2 focus:outline-none focus:border-teal-500"
               >
                 {availableCategories.map((cat, idx) => (
                   <option key={idx} value={cat}>
@@ -442,7 +460,7 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
               <select
                 value={selectedYear}
                 onChange={(e) => setSelectedYear(e.target.value)}
-                className="bg-slate-950 border border-slate-800 text-slate-200 text-xs rounded-xl px-3 py-2 focus:outline-none focus:border-indigo-500"
+                className="bg-[#0b0f19] border border-slate-800 text-slate-200 text-xs rounded-xl px-3 py-2 focus:outline-none focus:border-teal-500"
               >
                 {availableYears.map((yr, idx) => (
                   <option key={idx} value={yr}>
@@ -461,9 +479,9 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
               <select
                 value={sortBy}
                 onChange={(e) => setSortBy(e.target.value)}
-                className="bg-slate-950 border border-slate-800 text-slate-200 text-xs rounded-xl px-3 py-2 focus:outline-none focus:border-indigo-500"
+                className="bg-[#0b0f19] border border-slate-800 text-slate-200 text-xs rounded-xl px-3 py-2 focus:outline-none focus:border-teal-500"
               >
-                <option value="relevance">Relevance (Dense Cosine Similarity)</option>
+                <option value="relevance">Default Order</option>
                 <option value="year-desc">Newest First</option>
                 <option value="year-asc">Oldest First</option>
                 <option value="title">Title (A-Z)</option>
@@ -471,56 +489,56 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
             </div>
           </div>
 
-          {/* Results Header */}
+          {/* Results Summary Header */}
           <div className="flex items-center justify-between border-b border-slate-800 pb-3 text-sm">
             <span className="text-slate-400">
-              Showing <strong className="text-slate-200">{filteredLocalPapers.length}</strong> local research papers
-              {query && <span> for "<span className="text-indigo-300">{query}</span>"</span>}
+              Showing <strong className="text-slate-100">{filteredLocalPapers.length}</strong> papers in library
+              {query && <span> matching "<span className="text-teal-300">{query}</span>"</span>}
             </span>
-            <span className="text-xs text-indigo-400/80 font-mono hidden sm:inline">
-              PostgreSQL 17 + pgvector (768-dim)
+            <span className="text-xs text-teal-400/80 hidden sm:inline">
+              Verified Full-Text Index
             </span>
           </div>
 
-          {/* Live pgvector Semantic Matches */}
-          {vectorResults.length > 0 && (
-            <div className="bg-slate-900/90 border border-indigo-500/30 rounded-2xl p-5 space-y-4">
+          {/* Smart Passage Matches (when searching) */}
+          {passageResults.length > 0 && (
+            <div className="bg-[#101625] border border-teal-500/30 rounded-2xl p-5 space-y-4">
               <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 text-indigo-400 font-semibold text-sm">
-                  <Sparkles className="w-4 h-4" />
-                  <span>Dense Vector Matches (pgvector + BGE 768-dim)</span>
+                <div className="flex items-center gap-2 text-teal-300 font-semibold text-sm">
+                  <Sparkles className="w-4 h-4 text-teal-400" />
+                  <span>Key Relevant Passages</span>
                 </div>
-                <span className="text-xs text-slate-400 font-mono">
-                  Top {vectorResults.length} Chunks
+                <span className="text-xs text-slate-400">
+                  {passageResults.length} relevant excerpts found
                 </span>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {vectorResults.map((chunk, idx) => (
-                  <div key={idx} className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2">
+                {passageResults.map((chunk, idx) => (
+                  <div key={idx} className="bg-[#0b0f19] p-4 rounded-xl border border-slate-800 space-y-2.5">
                     <div className="flex items-center justify-between text-xs">
-                      <span className="font-semibold text-indigo-300">
-                        Paper: {chunk.title}
+                      <span className="font-semibold text-teal-300 truncate max-w-[220px]">
+                        {chunk.title}
                       </span>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 shrink-0">
                         <span className="text-slate-400">Page {chunk.page}</span>
-                        <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                          Sim: {(chunk.similarity * 100).toFixed(1)}%
+                        <span className="px-2 py-0.5 rounded text-[11px] bg-teal-500/10 text-teal-300 border border-teal-500/30">
+                          {chunk.similarity > 0.75 ? "Top Match" : "Relevant"}
                         </span>
                       </div>
                     </div>
 
-                    <p className="text-xs text-slate-300 line-clamp-3 leading-relaxed">
+                    <p className="text-xs text-slate-300 font-serif-quote line-clamp-3 leading-relaxed">
                       "{chunk.text}"
                     </p>
 
-                    <div className="pt-2 flex justify-end">
+                    <div className="pt-1 flex justify-end">
                       <Link
                         to={`/paper/${chunk.paper_id}/ask?initialQ=${encodeURIComponent(query)}`}
-                        className="inline-flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 font-medium hover:underline"
+                        className="inline-flex items-center gap-1.5 text-xs text-teal-400 hover:text-teal-300 font-medium hover:underline"
                       >
                         <MessageSquare className="w-3.5 h-3.5" />
-                        <span>Ask about this chunk</span>
+                        <span>Ask about this passage</span>
                       </Link>
                     </div>
                   </div>
@@ -529,34 +547,65 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
             </div>
           )}
 
+          {/* Loading Skeleton */}
+          {isLoading && (
+            <LoadingState type="cards" count={6} />
+          )}
+
+          {/* Backend Error State */}
+          {!isLoading && backendError && paperList.length === 0 && (
+            <div className="bg-[#101625] border border-rose-500/30 rounded-3xl p-8 sm:p-12 text-center max-w-xl mx-auto space-y-4">
+              <div className="w-12 h-12 rounded-2xl bg-rose-500/10 border border-rose-500/20 text-rose-400 flex items-center justify-center mx-auto">
+                <AlertCircle className="w-6 h-6" />
+              </div>
+              <div className="space-y-1.5">
+                <h3 className="text-lg font-bold text-slate-100">Unable to Load Paper Library</h3>
+                <p className="text-xs sm:text-sm text-slate-400 leading-relaxed">
+                  The backend service could not be reached. Please check that your server is running.
+                </p>
+              </div>
+              {onRetry && (
+                <div className="pt-2">
+                  <button
+                    onClick={onRetry}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-teal-600 hover:bg-teal-500 text-white font-semibold text-xs sm:text-sm transition-all shadow-md active:scale-95"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                    <span>Retry Connection</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Paper Results Grid */}
-          {filteredLocalPapers.length > 0 ? (
+          {!isLoading && filteredLocalPapers.length > 0 ? (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
               {filteredLocalPapers.map((paper) => (
                 <PaperCard
                   key={paper.id}
                   paper={paper}
-                  isSaved={savedPaperIds.includes(paper.id)}
+                  isSaved={savedPaperIds.includes(String(paper.id))}
                   onToggleSave={onToggleSave}
                 />
               ))}
             </div>
-          ) : (
+          ) : !isLoading && !backendError ? (
             <EmptyState
               icon="search"
               title={
                 selectedCategory !== 'All Categories' || selectedYear !== 'All Years'
-                  ? "No papers match selected filter"
-                  : "No matching local papers"
+                  ? "No papers match your filter"
+                  : "No matching papers found"
               }
               description={
                 query
-                  ? `No local paper matched "${query}". You can switch to the "arXiv Global Explorer" tab above to search millions of external papers.`
-                  : `No paper in your library matched Category: "${selectedCategory}" and Year: "${selectedYear}". Click below to reset filters and view all papers.`
+                  ? `No paper in your collection matched "${query}". You can switch to the "Discover on arXiv" tab to search millions of external papers.`
+                  : `No paper matched Category: "${selectedCategory}" and Year: "${selectedYear}". Click below to reset your filters.`
               }
               actionLabel={
                 selectedCategory !== 'All Categories' || selectedYear !== 'All Years'
-                  ? "Reset Filters (Show All Papers)"
+                  ? "Reset Filters (Show All)"
                   : "Search on arXiv Instead"
               }
               actionTo={
@@ -573,16 +622,16 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
                   : undefined
               }
             />
-          )}
+          ) : null}
         </div>
       )}
 
       {/* ======================================================== */}
-      {/* TAB 2: ARXIV GLOBAL EXPLORER CONTENT */}
+      {/* TAB 2: ARXIV DISCOVERY CONTENT */}
       {/* ======================================================== */}
       {activeTab === 'arxiv' && (
         <div className="space-y-6">
-          {/* Warning Banner (e.g. rate limit notice with retry) */}
+          {/* Warning Banner */}
           {arxivWarning && (
             <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 flex items-start justify-between gap-3 text-amber-300 text-xs">
               <div className="flex items-start gap-2.5">
@@ -622,20 +671,20 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
           <div className="flex items-center justify-between border-b border-slate-800 pb-3 text-sm">
             <span className="text-slate-400">
               {isSearchingArxiv ? (
-                <span className="flex items-center gap-2 text-purple-300">
+                <span className="flex items-center gap-2 text-teal-300">
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>Searching official arXiv database...</span>
+                  <span>Searching open-access research on arXiv...</span>
                 </span>
               ) : (
                 <span>
-                  Showing <strong className="text-slate-200">{arxivPapers.length}</strong> arXiv papers
-                  {query && <span> for "<span className="text-purple-300">{query}</span>"</span>}
-                  {arxivTotal > 0 && <span className="text-slate-500"> ({arxivTotal.toLocaleString()} total found)</span>}
+                  Showing <strong className="text-slate-100">{arxivPapers.length}</strong> arXiv papers
+                  {query && <span> for "<span className="text-teal-300">{query}</span>"</span>}
+                  {arxivTotal > 0 && <span className="text-slate-400"> ({arxivTotal.toLocaleString()} total found)</span>}
                 </span>
               )}
             </span>
-            <span className="text-xs text-purple-400/80 font-mono hidden sm:inline">
-              Official arXiv API Atom Feed
+            <span className="text-xs text-emerald-400/80 hidden sm:inline">
+              arXiv Global Repository
             </span>
           </div>
 
@@ -652,20 +701,20 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
                 return (
                   <div
                     key={paper.arxiv_id}
-                    className="bg-slate-900/80 border border-slate-800 hover:border-slate-700/80 rounded-2xl p-6 space-y-4 transition-all shadow-md"
+                    className="bg-[#111726]/80 border border-slate-800 hover:border-slate-700 rounded-2xl p-6 space-y-4 transition-all shadow-md"
                   >
                     {/* Top Row: Category, Year, ID & Status Badge */}
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md bg-purple-500/10 text-purple-300 border border-purple-500/20 text-xs font-semibold">
-                          <Tag className="w-3 h-3" />
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md bg-teal-500/10 text-teal-300 border border-teal-500/20 text-xs font-semibold">
+                          <Tag className="w-3 h-3 text-teal-400" />
                           {paper.category}
                         </span>
-                        <span className="inline-flex items-center gap-1 text-xs text-slate-400 px-2 py-0.5 rounded bg-slate-950 border border-slate-800">
+                        <span className="inline-flex items-center gap-1 text-xs text-slate-400 px-2 py-0.5 rounded bg-[#0b0f19] border border-slate-800">
                           <Calendar className="w-3 h-3" />
                           {paper.year}
                         </span>
-                        <span className="text-xs font-mono text-slate-400 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
+                        <span className="text-xs font-mono text-slate-400 bg-[#0b0f19] px-2 py-0.5 rounded border border-slate-800">
                           arXiv:{paper.arxiv_id}
                         </span>
                       </div>
@@ -675,24 +724,24 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
                         {isCompleted ? (
                           <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 text-xs font-semibold">
                             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                            <span>In Library</span>
+                            <span>In Your Library</span>
                           </span>
                         ) : isProcessing ? (
-                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-indigo-500/10 text-indigo-300 border border-indigo-500/30 text-xs font-semibold animate-pulse">
-                            <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400" />
-                            <span>Processing...</span>
+                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-teal-500/10 text-teal-300 border border-teal-500/30 text-xs font-semibold animate-pulse">
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-teal-400" />
+                            <span>Adding to Library...</span>
                           </span>
                         ) : (
                           <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-800 text-slate-300 border border-slate-700 text-xs font-medium">
-                            <Globe className="w-3.5 h-3.5 text-purple-400" />
-                            <span>External arXiv Paper</span>
+                            <Globe className="w-3.5 h-3.5 text-teal-400" />
+                            <span>Open-Access Research</span>
                           </span>
                         )}
                       </div>
                     </div>
 
                     {/* Title */}
-                    <h3 className="text-lg sm:text-xl font-bold text-slate-100 hover:text-purple-300 transition-colors leading-snug">
+                    <h3 className="text-base sm:text-xl font-bold text-slate-100 hover:text-teal-300 transition-colors leading-snug">
                       {paper.title}
                     </h3>
 
@@ -702,22 +751,22 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
                     </p>
 
                     {/* Abstract */}
-                    <p className="text-xs sm:text-sm text-slate-300 leading-relaxed font-serif line-clamp-3 bg-slate-950/60 p-3.5 rounded-xl border border-slate-800/80">
+                    <p className="text-xs sm:text-sm text-slate-300 leading-relaxed font-serif-quote line-clamp-3 bg-[#0b0f19]/70 p-3.5 rounded-xl border border-slate-800/80">
                       "{paper.abstract}"
                     </p>
 
-                    {/* Active Ingestion Progress Box */}
+                    {/* Processing Progress Notice */}
                     {isProcessing && (
-                      <div className="bg-indigo-950/40 border border-indigo-500/30 rounded-xl p-3.5 space-y-2 animate-in fade-in">
+                      <div className="bg-teal-950/30 border border-teal-500/30 rounded-xl p-3.5 space-y-2 animate-in fade-in">
                         <div className="flex items-center justify-between text-xs">
-                          <span className="font-semibold text-indigo-300 flex items-center gap-2">
-                            <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400" />
-                            {task.progress || 'Preparing paper for Q&A...'}
+                          <span className="font-semibold text-teal-300 flex items-center gap-2">
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-teal-400" />
+                            {task.progress || 'Preparing paper for reading and questions...'}
                           </span>
-                          <span className="text-[11px] text-slate-400 font-mono">BGE Embedding + pgvector</span>
+                          <span className="text-[11px] text-slate-400">Processing document text</span>
                         </div>
                         <div className="w-full bg-slate-900 rounded-full h-1.5 overflow-hidden">
-                          <div className="bg-gradient-to-r from-indigo-500 to-purple-500 h-1.5 rounded-full animate-pulse w-3/4"></div>
+                          <div className="bg-gradient-to-r from-teal-500 to-emerald-400 h-1.5 rounded-full animate-pulse w-3/4"></div>
                         </div>
                       </div>
                     )}
@@ -744,7 +793,7 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
                             href={paper.arxiv_url}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-slate-100 transition-colors"
+                            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-[#0b0f19] hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-slate-100 transition-colors"
                           >
                             <span>arXiv Abstract</span>
                             <ExternalLink className="w-3 h-3 text-slate-400" />
@@ -756,10 +805,10 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
                             href={paper.pdf_url}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-slate-100 transition-colors"
+                            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-[#0b0f19] hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-slate-100 transition-colors"
                           >
-                            <FileText className="w-3 h-3 text-rose-400" />
-                            <span>Official PDF</span>
+                            <FileText className="w-3 h-3 text-teal-400" />
+                            <span>PDF File</span>
                           </a>
                         )}
                       </div>
@@ -769,7 +818,7 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
                         {isCompleted ? (
                           <Link
                             to={`/paper/${effectivePaperId}/ask`}
-                            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs sm:text-sm shadow-md shadow-emerald-600/20 transition-all active:scale-95"
+                            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 text-white font-semibold text-xs sm:text-sm shadow-md shadow-teal-600/20 transition-all active:scale-95"
                           >
                             <MessageSquare className="w-4 h-4" />
                             <span>Ask This Paper</span>
@@ -780,16 +829,16 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
                             disabled
                             className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-800 text-slate-400 font-semibold text-xs sm:text-sm cursor-not-allowed"
                           >
-                            <Loader2 className="w-4 h-4 animate-spin text-indigo-400" />
-                            <span>Preparing Document...</span>
+                            <Loader2 className="w-4 h-4 animate-spin text-teal-400" />
+                            <span>Adding to Library...</span>
                           </button>
                         ) : (
                           <button
                             onClick={() => handleStartPrepare(paper)}
-                            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs sm:text-sm shadow-md shadow-indigo-600/20 transition-all active:scale-95"
+                            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 text-white font-semibold text-xs sm:text-sm shadow-md shadow-teal-600/20 transition-all active:scale-95"
                           >
                             <Sparkles className="w-4 h-4" />
-                            <span>Prepare for Q&A</span>
+                            <span>Add to Library</span>
                           </button>
                         )}
                       </div>
@@ -803,18 +852,18 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
                 <button
                   disabled={arxivPage <= 1 || isSearchingArxiv}
                   onClick={() => setArxivPage((p) => Math.max(1, p - 1))}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#101625] border border-slate-800 hover:border-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   <ChevronLeft className="w-4 h-4" />
                   <span>Previous</span>
                 </button>
 
-                <span>Page <strong className="text-slate-200">{arxivPage}</strong></span>
+                <span>Page <strong className="text-slate-100">{arxivPage}</strong></span>
 
                 <button
                   disabled={arxivPapers.length < 10 || isSearchingArxiv}
                   onClick={() => setArxivPage((p) => p + 1)}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#101625] border border-slate-800 hover:border-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   <span>Next Page</span>
                   <ChevronRight className="w-4 h-4" />
@@ -827,11 +876,11 @@ export default function SearchResultsPage({ papers, savedPaperIds, onToggleSave 
               title={query ? 'No arXiv papers found' : 'Discover research papers on arXiv'}
               description={
                 query
-                  ? `No external paper matched "${query}". Try searching by another keyword, author name, or arXiv ID like "1706.03762".`
-                  : 'Enter a topic, research question, author name, or arXiv ID in the search bar above to query millions of papers from arXiv.'
+                  ? `No external paper matched "${query}". Try searching by another topic, author name, or arXiv ID like "1706.03762".`
+                  : 'Enter a topic, research question, author name, or arXiv ID in the search bar above to query open-access papers.'
               }
               actionLabel="Search Attention Papers"
-              actionTo="/search?tab=arxiv&q=attention%20is%20all%20you%20need"
+              actionTo="/search?tab=arxiv&q=attention%20mechanism"
             />
           ) : null}
         </div>

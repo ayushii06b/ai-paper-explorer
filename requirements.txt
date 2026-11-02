@@ -7,3 +7,4 @@ pgvector
 python-dotenv
 fastapi
 uvicorn
+groq
